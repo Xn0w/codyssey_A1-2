@@ -16,6 +16,7 @@ import os
 import json
 import argparse
 from datetime import datetime
+from zoneinfo import ZoneInfo       # 특정 시간대(time zone)의 "오늘 날짜"를 정확히 알아내기 위한 표준 라이브러리
 
 from google import genai              # Gemini API 최신 통합 SDK (pip install google-genai)
                                         # * 예전 google-generativeai 패키지는 서비스가 종료(deprecated)되어
@@ -24,6 +25,7 @@ import requests                        # 카카오 API 호출용 (pip install re
 from dotenv import load_dotenv         # .env 파일을 읽어오는 라이브러리
 
 GEMINI_MODEL_NAME = "gemini-2.5-flash"  # 현재(2026년 기준) 사용 가능한 Gemini 모델명
+TIMEZONE = "Asia/Seoul"                 # "오늘 날짜"를 판단하는 기준 시간대 (한국 표준시)
 
 
 # ============================================================
@@ -83,10 +85,19 @@ def parse_arguments():
     # 사용자가 입력한 날짜가 진짜 "YYYY-MM-DD" 형식인지 확인합니다.
     # 형식이 다르면(예: "2026/08/15") 에러를 내고 프로그램을 종료합니다.
     try:
-        datetime.strptime(args.date, "%Y-%m-%d")
+        input_date = datetime.strptime(args.date, "%Y-%m-%d").date()
     except ValueError:
         print('[오류] 날짜 형식이 올바르지 않습니다. "YYYY-MM-DD" 형식으로 입력해주세요.')
         parser.print_usage()
+        exit(1)
+
+    # 입력한 날짜가 "오늘"보다 이전인지 확인합니다.
+    # 여행 추천 프로그램이므로 이미 지나간 날짜를 입력하는 건 의미가 없기 때문입니다.
+    # datetime.now(ZoneInfo(...))는 "지금 이 컴퓨터가 있는 시간대가 아니라,
+    # 우리가 지정한 시간대(TIMEZONE) 기준으로 오늘이 며칠인지"를 알려줍니다.
+    today = datetime.now(ZoneInfo(TIMEZONE)).date()
+    if input_date < today:
+        print(f"[오류] 지난 날짜는 입력할 수 없습니다. 오늘({today.isoformat()}) 이후 날짜를 입력해주세요.")
         exit(1)
 
     return args.date
@@ -101,19 +112,20 @@ def get_travel_recommendation(date_str, retry=True):
     date_str: 사용자가 입력한 날짜 (예: "2026-08-15")
     retry: JSON 파싱이 실패했을 때 한 번 더 시도할지 여부 (기본 True = 1회 재시도 허용)
 
-    반환값: {"recommended_city": ..., "weather": ..., "events": [...], "reason": ...} 형태의 딕셔너리
+    반환값: {"recommended_cities": [...], "weather": ..., "events": [...], "reason": ...} 형태의 딕셔너리
+            (보너스 과제: 도시를 1개가 아닌 2~3개 리스트로 추천받습니다)
     """
     # AI에게 "반드시 이 형식의 JSON만 출력해줘"라고 명확하게 지시하는 것이 핵심입니다.
     # 사람 말투로 설명을 덧붙이면 JSON 파싱이 깨지기 쉬우므로, 형식을 못박아둡니다.
     prompt = f"""
-    {date_str}에 한국에서 여행하기 좋은 도시 1곳을 추천해줘.
+    {date_str}에 한국에서 여행하기 좋은 도시를 2~3곳 추천해줘.
     아래 JSON 형식으로만 응답하고, 다른 설명이나 코드블록 표시(```)는 절대 붙이지 마.
 
     {{
-        "recommended_city": "도시 이름 (예: 제주)",
+        "recommended_cities": ["도시 이름1 (예: 제주)", "도시 이름2 (예: 강릉)"],
         "weather": "그 시기의 일반적인 날씨 요약 (한 문장)",
         "events": ["행사/축제 후보 1", "행사/축제 후보 2"],
-        "reason": "추천 이유 (2~4문장)"
+        "reason": "추천 이유 (2~4문장, 왜 이 도시들을 골랐는지)"
     }}
     """
 
@@ -121,7 +133,7 @@ def get_travel_recommendation(date_str, retry=True):
     # -> API 호출 자체가 실패하든, JSON 파싱이 실패하든 항상 "같은 모양"의 딕셔너리를 반환하게 해서
     #    이후 코드(generate_report 등)가 굳이 None 체크를 복잡하게 하지 않아도 되게 합니다.
     empty_result = {
-        "recommended_city": None,
+        "recommended_cities": [],
         "weather": None,
         "events": [],
         "reason": None,
@@ -202,43 +214,50 @@ def search_restaurants(city_name, limit=5):
 #    지금까지 모은 정보(1차 추천 + 맛집 목록)를 다시 Gemini에게 보내서
 #    사람이 읽기 좋은 여행 리포트 글을 받아옵니다.
 # ============================================================
-def generate_report(date_str, travel_info, restaurants):
+def generate_report(date_str, travel_info, restaurants_by_city):
     """
-    travel_info: get_travel_recommendation()의 결과 (도시/날씨/행사/이유)
-    restaurants: search_restaurants()의 결과 (맛집 리스트, 0개일 수 있음)
+    travel_info: get_travel_recommendation()의 결과 (도시 리스트/날씨/행사/이유)
+    restaurants_by_city: {"제주": [...], "강릉": [...]} 형태의 딕셔너리 (도시별 맛집, 0개일 수 있음)
 
     반환값: Markdown 형식의 문자열 (그대로 .md 파일로 저장하면 됨)
     """
-    # 맛집 리스트를 Gemini가 이해하기 쉬운 텍스트로 미리 정리해둡니다.
-    if restaurants:
-        restaurant_text = "\n".join(
-            f"- {r['name']} ({r['category']}) - {r['address']}"
-            for r in restaurants
-        )
-    else:
-        restaurant_text = "검색된 맛집 없음 (데이터 없음으로 표기할 것)"
+    # 도시별 맛집 리스트를 Gemini가 이해하기 쉬운 텍스트로 미리 정리해둡니다.
+    # 예: "[제주]\n- 맛집A ...\n\n[강릉]\n- 맛집B ..."
+    city_sections = []
+    for city, restaurants in restaurants_by_city.items():
+        if restaurants:
+            restaurant_lines = "\n".join(
+                f"- {r['name']} ({r['category']}) - {r['address']}"
+                for r in restaurants
+            )
+        else:
+            restaurant_lines = "검색된 맛집 없음 (데이터 없음으로 표기할 것)"
+        city_sections.append(f"[{city}]\n{restaurant_lines}")
+    restaurant_text = "\n\n".join(city_sections) if city_sections else "데이터 없음"
 
-    # 1차 추천 결과와 맛집 목록을 프롬프트에 그대로 넣어서
+    cities = travel_info.get("recommended_cities") or []
+
+    # 1차 추천 결과와 도시별 맛집 목록을 프롬프트에 그대로 넣어서
     # "이 정보들을 바탕으로 리포트를 써줘"라고 요청합니다.
     prompt = f"""
     아래 정보를 바탕으로 {date_str} 여행 리포트를 Markdown 형식으로 작성해줘.
     다른 설명 없이 Markdown 리포트 본문만 출력해.
 
     [1차 추천 정보]
-    - 추천 도시: {travel_info.get("recommended_city") or "정보 없음"}
+    - 추천 도시 목록: {", ".join(cities) or "정보 없음"}
     - 추천 이유: {travel_info.get("reason") or "정보 없음"}
     - 날씨: {travel_info.get("weather") or "정보 없음"}
     - 행사/축제: {", ".join(travel_info.get("events") or []) or "정보 없음"}
 
-    [맛집 목록]
+    [도시별 맛집 목록]
     {restaurant_text}
 
     리포트에는 반드시 아래 항목이 모두 포함되어야 해:
-    1. 추천 지역 + 추천 이유 요약
+    1. 추천 지역(전체 목록) + 추천 이유 요약
     2. 날씨 요약
     3. 행사/축제 목록
-    4. 맛집 리스트 (맛집이 없으면 "데이터 없음"이라고 표시)
-    5. 오전/오후/저녁으로 나눈 하루 일정 제안
+    4. 맛집 리스트 — 도시별로 소제목을 나눠서 정리 (맛집이 없는 도시는 "데이터 없음"이라고 표시)
+    5. 도시별로 오전/오후/저녁으로 나눈 하루 일정 제안
     """
 
     try:
@@ -253,25 +272,47 @@ def generate_report(date_str, travel_info, restaurants):
         # Gemini 리포트 생성이 실패해도 프로그램이 죽지 않도록,
         # 최소한의 내용을 직접 조립해서 대신 반환합니다 (완전히 빈 결과보다는 낫습니다).
         print(f"[경고] 리포트 생성 중 Gemini 호출에 실패해 기본 형식으로 대체합니다: {e}")
-        city = travel_info.get("recommended_city") or "추천 도시 정보 없음"
         return (
             f"# {date_str} 여행 추천 리포트\n\n"
-            f"## 추천 지역\n{city}\n\n"
+            f"## 추천 지역\n{', '.join(cities) or '정보 없음'}\n\n"
             f"## 맛집 추천\n{restaurant_text}\n"
         )
 
 
 # ============================================================
+# 4-1. 캐시 확인하기 (보너스 과제: 결과 캐싱)
+#    같은 날짜로 이미 실행한 적이 있다면, results/ 폴더에 그 결과(raw.json)가 남아있습니다.
+#    이걸 다시 활용하면 Gemini/카카오 API를 또 호출할 필요가 없어서 비용과 시간을 아낄 수 있습니다.
+# ============================================================
+def load_cached_data(date_str):
+    """
+    date_str에 해당하는 원본 JSON(results/{date_str}_raw.json)이 이미 있으면 읽어서 반환하고,
+    없으면 None을 반환합니다.
+    """
+    cache_path = f"results/{date_str}_raw.json"
+    if not os.path.exists(cache_path):
+        return None
+
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        # 캐시 파일이 손상되었거나 읽을 수 없으면, 캐시가 없는 것처럼 취급하고
+        # 새로 API를 호출하도록 None을 반환합니다 (프로그램이 여기서 멈추면 안 되므로).
+        return None
+
+
+# ============================================================
 # 5. 결과 저장하기 (results/ 폴더에 JSON + Markdown 저장)
 # ============================================================
-def save_results(date_str, travel_info, restaurants, report_text, errors):
+def save_results(date_str, travel_info, restaurants_by_city, report_text, errors):
     os.makedirs("results", exist_ok=True)  # results 폴더가 없으면 새로 만듭니다.
 
     # 5-1) 원본 데이터(JSON) 저장 -> 나중에 다시 확인하거나 디버깅할 때 유용합니다.
     raw_data = {
         "date": date_str,
         "travel_info": travel_info,
-        "restaurants": restaurants,
+        "restaurants_by_city": restaurants_by_city,  # 도시별 맛집 리스트 (보너스: 복수 지역 지원)
         "errors": errors,  # 진행 중 발생한 오류들을 기록 (없으면 빈 리스트)
     }
     json_path = f"results/{date_str}_raw.json"
@@ -299,20 +340,39 @@ def main():
     print("[2/5] 입력값을 확인합니다...")
     date_str = parse_arguments()
 
-    print(f"[3/5] {date_str} 기준으로 여행지를 추천받는 중...")
-    travel_info = get_travel_recommendation(date_str)
-    if not travel_info.get("recommended_city"):
-        errors.append("Gemini 추천 결과를 받아오지 못했습니다.")
+    # 보너스 과제: 같은 날짜로 이미 실행한 적이 있는지 먼저 확인합니다.
+    cached = load_cached_data(date_str)
 
-    city = travel_info.get("recommended_city")
-    print(f"[4/5] {city}의 맛집을 검색하는 중...")
-    restaurants = search_restaurants(city)
-    if not restaurants:
-        errors.append("맛집 검색 결과가 없거나 검색에 실패했습니다.")
+    if cached:
+        # 캐시가 있으면 Gemini/카카오 API 호출을 건너뛰고 저장된 데이터를 그대로 재사용합니다.
+        print(f"[3/5] 캐시 발견: {date_str}에 대한 기존 데이터를 재사용합니다 (API 호출 생략)...")
+        travel_info = cached.get("travel_info", {})
+        restaurants_by_city = cached.get("restaurants_by_city", {})
+        errors = cached.get("errors", [])
+        cities = travel_info.get("recommended_cities") or []
+        print(f"[4/5] 캐시에 저장된 {len(cities)}개 지역({', '.join(cities)}) 데이터를 사용합니다...")
+
+    else:
+        # 캐시가 없으면 기존과 동일하게 API를 호출합니다.
+        print(f"[3/5] {date_str} 기준으로 여행지를 추천받는 중...")
+        travel_info = get_travel_recommendation(date_str)
+        cities = travel_info.get("recommended_cities") or []
+        if not cities:
+            errors.append("Gemini 추천 결과를 받아오지 못했습니다.")
+
+        # 보너스 과제: 도시가 여러 곳이므로, 도시별로 맛집을 따로 검색해서
+        # {"제주": [...], "강릉": [...]} 같은 딕셔너리 형태로 모아둡니다.
+        restaurants_by_city = {}
+        print(f"[4/5] {len(cities)}개 지역({', '.join(cities)})의 맛집을 검색하는 중...")
+        for city in cities:
+            city_restaurants = search_restaurants(city)
+            restaurants_by_city[city] = city_restaurants
+            if not city_restaurants:
+                errors.append(f"{city}: 맛집 검색 결과가 없거나 검색에 실패했습니다.")
 
     print("[5/5] 최종 리포트를 작성하고 저장하는 중...")
-    report_text = generate_report(date_str, travel_info, restaurants)
-    json_path, report_path = save_results(date_str, travel_info, restaurants, report_text, errors)
+    report_text = generate_report(date_str, travel_info, restaurants_by_city)
+    json_path, report_path = save_results(date_str, travel_info, restaurants_by_city, report_text, errors)
 
     print("\n완료되었습니다!")
     print(f"- 원본 데이터: {json_path}")
