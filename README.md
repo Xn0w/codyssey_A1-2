@@ -13,33 +13,49 @@
 
 ## 2. 실행 방법
 
-### 2-1. 가상환경 생성 및 활성화
+이 프로젝트는 시스템 파이썬을 보호하기 위해 프로젝트 전용 가상환경(venv)을 사용합니다. 일부 환경에서는 `python3`/`pip` 명령어가 시스템 파이썬으로 alias 되어 있어 venv를 활성화해도 우회되는 경우가 있으므로, `source venv/bin/activate` 대신 **venv 폴더 안의 실행 파일을 직접 지정하는 방식**을 사용합니다. 이 방식은 어떤 환경에서도 동일하게 동작합니다.
 
-시스템 파이썬을 보호하기 위해 프로젝트 전용 가상환경(venv)을 사용합니다.
+### 2-1. 최초 1회 설정 (venv가 없는 새 컴퓨터/새 클론 시)
 
 ```bash
+cd A1-2
 python3 -m venv venv
-source venv/bin/activate
+venv/bin/pip install google-genai requests python-dotenv
 ```
 
-### 2-2. 라이브러리 설치
+### 2-2. 평소 실행 (새 터미널을 열었을 때, venv가 이미 있는 경우)
 
 ```bash
-pip install google-genai requests python-dotenv
-```
-
-### 2-3. 프로그램 실행
-
-```bash
-python3 main.py -date "YYYY-MM-DD"
+cd A1-2
+venv/bin/python3 main.py -date "YYYY-MM-DD"
 ```
 
 예시:
 ```bash
-python3 main.py -date "2026-08-15"
+venv/bin/python3 main.py -date "2026-08-15"
 ```
 
 `-date`는 필수 옵션이며, `"YYYY-MM-DD"` 형식이 아니면 사용법을 안내하고 프로그램이 종료됩니다.
+
+> 새 라이브러리를 추가로 설치해야 할 때만 `venv/bin/pip install <라이브러리명>`을 다시 실행하면 됩니다.
+
+### 2-3. 왜 `-date`를 따로 나눠서 입력하면 안 되나요?
+
+`python3 main.py`만 먼저 실행하고, 그다음 줄에 `-date "2026-08-15"`를 따로 입력하는 방식은 동작하지 않습니다.
+
+이 프로그램은 `argparse`라는 도구로 실행 옵션을 처리하는데, `argparse`는 **프로그램이 시작되는 바로 그 순간에** 함께 전달된 옵션만 읽을 수 있습니다. `-date` 없이 `python3 main.py`만 실행하면, 프로그램은 시작하자마자 "필수 옵션이 없다"고 판단하고 그 자리에서 바로 종료됩니다. 한번 종료된 프로그램은 더 이상 실행 중이 아니므로, 그 뒤에 `-date "2026-08-15"`를 아무리 입력해도 그건 프로그램에게 전달되는 것이 아니라 터미널이 그냥 알 수 없는 명령어로 취급할 뿐입니다.
+
+비유하자면, 식당에 들어가면서 "예약자 성함"을 같이 말하지 않으면 입구에서 바로 돌려보내지는 것과 같습니다. 문이 닫힌 뒤에 문 밖에서 이름을 외쳐봐야 이미 늦은 것처럼, `-date`도 반드시 프로그램을 실행하는 한 줄 안에 함께 적어야 합니다.
+
+```bash
+# 올바른 사용법 (한 줄로 함께 입력)
+venv/bin/python3 main.py -date "2026-08-15"
+```
+```bash
+# 동작하지 않는 사용법 (따로 나눠서 입력)
+venv/bin/python3 main.py
+-date "2026-08-15"
+```
 
 ## 3. API 키 설정 방법
 
